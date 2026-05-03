@@ -21,10 +21,19 @@ import nest_asyncio
 import streamlit as st
 
 nest_asyncio.apply()
-os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-os.environ["LANGSMITH_API_KEY"] = st.secrets["LANGSMITH_API_KEY"]
-os.environ["LANGSMITH_TRACING"] = st.secrets["LANGSMITH_TRACING"]
-os.environ["LANGSMITH_PROJECT"] = st.secrets["LANGSMITH_PROJECT"]
+
+# Support both Streamlit secrets and environment variables (for Railway/Docker)
+def get_secret(key: str, default: str = "") -> str:
+    """Get secret from Streamlit secrets or environment variables."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, default)
+
+os.environ["GROQ_API_KEY"] = get_secret("GROQ_API_KEY")
+os.environ["LANGSMITH_API_KEY"] = get_secret("LANGSMITH_API_KEY")
+os.environ["LANGSMITH_TRACING"] = get_secret("LANGSMITH_TRACING", "true")
+os.environ["LANGSMITH_PROJECT"] = get_secret("LANGSMITH_PROJECT", "Shopping")
 
 # ── LLM ──
 llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.3)
@@ -76,16 +85,30 @@ class ProductState(TypedDict):
 
 # ── Helper functions ──
 async def fetch_page(url: str) -> str:
+    """Fetch a page using Playwright (headless Chromium) to bypass bot detection."""
+    from playwright.async_api import async_playwright
     for attempt in range(3):
         try:
-            headers = {**HEADERS, "User-Agent": random.choice(USER_AGENTS)}
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                r = await client.get(url, headers=headers, timeout=15.0)
-                if r.status_code == 200:
-                    return r.text
-                await asyncio.sleep(1 + attempt)
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent=random.choice(USER_AGENTS),
+                    locale="en-IN",
+                    extra_http_headers={
+                        "Accept-Language": "en-IN,en;q=0.9",
+                    }
+                )
+                page = await context.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                # Wait a bit for dynamic content
+                await page.wait_for_timeout(2000)
+                html = await page.content()
+                await browser.close()
+                if html and len(html) > 1000:
+                    return html
+            await asyncio.sleep(1 + attempt)
         except Exception:
-            await asyncio.sleep(1)
+            await asyncio.sleep(1 + attempt)
     return ""
 
 

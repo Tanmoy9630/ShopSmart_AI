@@ -7,3 +7,4 @@ httpx
 pydantic>=2.0.0
 nest_asyncio
 streamlit
+playwright
