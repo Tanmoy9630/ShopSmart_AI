@@ -31,7 +31,8 @@ COPY . .
 
 # Create .streamlit directory for secrets (Railway will inject env vars)
 RUN mkdir -p .streamlit
-
+# Railway ignores EXPOSE, but it's good for documentation
 EXPOSE 8501
 
-CMD ["streamlit", "run", "amazon_product_comparision.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+# Using a shell form here helps with variable expansion
+CMD streamlit run amazon_product_comparision.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
