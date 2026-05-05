@@ -35,4 +35,4 @@ RUN mkdir -p .streamlit
 EXPOSE 8501
 
 # Using a shell form here helps with variable expansion
-CMD streamlit run amazon_product_comparision.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+CMD streamlit run main.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true

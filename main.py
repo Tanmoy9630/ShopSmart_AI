@@ -20,6 +20,7 @@ from langgraph.graph import StateGraph, START, END
 import nest_asyncio
 import streamlit as st
 
+
 nest_asyncio.apply()
 
 # Support both Streamlit secrets and environment variables (for Railway/Docker)
@@ -90,7 +91,7 @@ async def fetch_page(url: str) -> str:
     for attempt in range(3):
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
                 context = await browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
                     locale="en-IN",
