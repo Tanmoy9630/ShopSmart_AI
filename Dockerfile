@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Install system dependencies for Playwright
+# Install system dependencies for Playwright + Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     libgtk-3-0 \
     libxshmfence1 \
     libx11-xcb1 \
+    libxkbcommon0 \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,15 +25,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium
+# Install Playwright and ONLY the chromium browser to save space
+RUN playwright install --with-deps chromium
 
 COPY . .
 
-# Create .streamlit directory for secrets (Railway will inject env vars)
-RUN mkdir -p .streamlit
-# Railway ignores EXPOSE, but it's good for documentation
-EXPOSE 8501
+# Set environment variables for Streamlit
+ENV STREAMLIT_SERVER_PORT=8080
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_HEADLESS=true
 
-# Using a shell form here helps with variable expansion
-CMD streamlit run main.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+# Make sure the filename here matches your actual file (step2.py or main.py)
+CMD ["sh", "-c", "streamlit run main.py --server.port=${PORT:-8080}"]
