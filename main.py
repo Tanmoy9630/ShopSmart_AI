@@ -38,7 +38,8 @@ os.environ["LANGSMITH_PROJECT"] = get_secret("LANGSMITH_PROJECT", "Shopping")
 
 # ── LLM ──
 llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.3)
-selection_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+extraction_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+selection_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)  # 8B is enough for picking a number
 
 # ── Headers ──
 USER_AGENTS = [
@@ -105,7 +106,7 @@ async def fetch_page(url: str) -> str:
                 await page.wait_for_timeout(2000)
                 html = await page.content()
                 await browser.close()
-                if html and len(html) > 1000:
+                if html and len(html) > 5000:
                     return html
             await asyncio.sleep(1 + attempt)
         except Exception:
@@ -130,17 +131,133 @@ def extract_product_image(html: str) -> str:
     return ""
 
 
-def html_to_text(html: str, max_chars: int = 10000) -> str:
+def html_to_text(html: str, max_chars: int = 8000) -> str:
+    """Extract only product-relevant text from Amazon page, minimizing tokens sent to LLM."""
     soup = BeautifulSoup(html, "html.parser")
-    for tag in soup.find_all(["script", "style", "noscript", "iframe", "svg", "link", "meta"]):
+    
+    # Remove all non-content tags
+    for tag in soup.find_all(["script", "style", "noscript", "iframe", "svg", "link", "meta", "header", "footer", "nav"]):
         tag.decompose()
-    lines, prev = [], None
-    for line in soup.get_text(separator="\n").split("\n"):
-        line = line.strip()
-        if line and len(line) > 1 and line != prev:
-            lines.append(line)
-            prev = line
-    return "\n".join(lines)[:max_chars]
+    
+    # Remove hidden elements
+    for tag in soup.find_all(attrs={"style": re.compile(r"display\s*:\s*none")}):
+        tag.decompose()
+    
+    sections = []
+    
+    # 1. Product Title
+    title_el = soup.find("span", id="productTitle")
+    if title_el:
+        sections.append(f"TITLE: {title_el.get_text(strip=True)}")
+    
+    # 2. Price block
+    price_whole = soup.find("span", class_="a-price-whole")
+    price_symbol = soup.find("span", class_="a-price-symbol")
+    if price_whole:
+        symbol = price_symbol.get_text(strip=True) if price_symbol else "₹"
+        sections.append(f"PRICE: {symbol}{price_whole.get_text(strip=True)}")
+    
+    # MRP / original price
+    mrp = soup.find("span", class_="a-text-price")
+    if mrp:
+        sections.append(f"MRP: {mrp.get_text(strip=True)}")
+    
+    # 3. Rating
+    rating_el = soup.find("span", id="acrPopover") or soup.find("span", class_="a-icon-alt")
+    if rating_el:
+        sections.append(f"RATING: {rating_el.get_text(strip=True)}")
+    
+    reviews_el = soup.find("span", id="acrCustomerReviewText")
+    if reviews_el:
+        sections.append(f"REVIEWS: {reviews_el.get_text(strip=True)}")
+    
+    # 4. Brand
+    brand_row = soup.find("tr", class_="po-brand")
+    if brand_row:
+        val = brand_row.find("span", class_="po-break-word")
+        if val:
+            sections.append(f"BRAND: {val.get_text(strip=True)}")
+    else:
+        brand_link = soup.find("a", id="bylineInfo")
+        if brand_link:
+            sections.append(f"BRAND: {brand_link.get_text(strip=True)}")
+    
+    # 5. Feature bullets
+    bullets = soup.find(id="feature-bullets")
+    if bullets:
+        items = [li.get_text(strip=True) for li in bullets.find_all("li") if li.get_text(strip=True)]
+        if items:
+            sections.append("FEATURES:\n" + "\n".join(f"- {item}" for item in items[:10]))
+    
+    # 6. Technical Details tables (multiple possible IDs)
+    for table_id in ["productDetails_techSpec_section_1", "productDetails_detailBullets_sections1",
+                     "technicalSpecifications_section_1"]:
+        table = soup.find(id=table_id)
+        if table:
+            rows = []
+            for tr in table.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in tr.find_all(["th", "td"])]
+                if len(cells) == 2 and cells[0] and cells[1]:
+                    rows.append(f"{cells[0]}: {cells[1]}")
+            if rows:
+                sections.append("TECHNICAL DETAILS:\n" + "\n".join(rows))
+    
+    # 7. Product overview table (po- rows)
+    po_rows = []
+    for tr in soup.find_all("tr", class_=re.compile(r"^po-")):
+        label = tr.find("td", class_="a-span3")
+        value = tr.find("td", class_="a-span9")
+        if label and value:
+            l = label.get_text(strip=True)
+            v = value.get_text(strip=True)
+            if l and v:
+                po_rows.append(f"{l}: {v}")
+    if po_rows:
+        sections.append("PRODUCT OVERVIEW:\n" + "\n".join(po_rows))
+    
+    # 8. Detail bullets (alternative format)
+    detail_bullets = soup.find(id="detailBullets_feature_div")
+    if detail_bullets:
+        rows = []
+        for li in detail_bullets.find_all("li"):
+            vals = li.get_text(separator=" ", strip=True)
+            if vals:
+                rows.append(vals)
+        if rows:
+            sections.append("DETAIL BULLETS:\n" + "\n".join(rows[:15]))
+    
+    # 9. "a-keyvalue" / "prodDetTable" tables
+    for table in soup.find_all("table", class_=re.compile(r"a-keyvalue|prodDetTable")):
+        if table.get("id") in ["productDetails_techSpec_section_1"]:
+            continue  # already captured
+        rows = []
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in tr.find_all(["th", "td"])]
+            if len(cells) == 2 and cells[0] and cells[1]:
+                rows.append(f"{cells[0]}: {cells[1]}")
+        if rows:
+            sections.append("SPECS TABLE:\n" + "\n".join(rows))
+    
+    # 10. Product description
+    desc = soup.find(id="productDescription")
+    if desc:
+        text = desc.get_text(strip=True)
+        if text:
+            sections.append(f"DESCRIPTION: {text[:500]}")
+    
+    result = "\n\n".join(sections)
+    
+    # Fallback: if targeted extraction found very little, do generic text extraction
+    if len(result) < 200:
+        lines, prev = [], None
+        for line in soup.get_text(separator="\n").split("\n"):
+            line = line.strip()
+            if line and len(line) > 1 and line != prev:
+                lines.append(line)
+                prev = line
+        result = "\n".join(lines)
+    
+    return result[:max_chars] if result else "No product details found on page."
 
 
 # ── LangGraph Nodes ──
@@ -153,6 +270,13 @@ def search_product(state: ProductState) -> ProductState:
     if not html:
         state["error"] = "Could not search Amazon."
         return state
+
+    # # Debug: save HTML to check what Amazon returned
+    # with open("/tmp/amazon_debug.html", "w") as f:
+    #     f.write(html[:5000])
+    # st.sidebar.text(f"HTML length: {len(html)}")
+    # st.sidebar.text(f"Has data-asin: {'data-asin' in html}")
+    # st.sidebar.text(f"Has captcha: {'captcha' in html.lower()}")
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -240,7 +364,10 @@ def extract_details(state: ProductState) -> ProductState:
     if state.get("error"):
         return state
 
-    structured_llm = llm.with_structured_output(ProductSpecs)
+    # Small delay before calling 70B model to avoid rate limits
+    time.sleep(3)
+
+    structured_llm = extraction_llm.with_structured_output(ProductSpecs)
     messages = [
         SystemMessage(content=f"""You are a product information extraction expert.
 Below is text from an Amazon.in product detail page.
@@ -267,7 +394,7 @@ RULES:
                 err_str = str(e).lower()
                 retryable = "429" in str(e) or "rate" in err_str or "connection" in err_str or "timeout" in err_str
                 if attempt < 3 and retryable:
-                    time.sleep(5 + attempt * 5)
+                    time.sleep(10 + attempt * 10)
                     continue
                 raise e
     except Exception as e:
@@ -393,7 +520,7 @@ st.set_page_config(page_title="ShopSmart AI", page_icon="🛒", layout="wide")
 st.title("🛒 ShopSmart AI — Product Comparison Tool")
 st.caption("Enter product names → We fetch details from Amazon → AI analyzes & recommends the best buy for you")
 
-num_products = st.slider("How many products to check?", min_value=1, max_value=5, value=1)
+num_products = st.slider("How many products to check?", min_value=1, max_value=3, value=2)
 
 queries = []
 cols = st.columns(num_products)
@@ -411,9 +538,9 @@ if st.button("🔍 Extract Details", type="primary"):
         progress = st.progress(0, text="Starting...")
         for idx, query in enumerate(filled):
             progress.progress(idx / len(filled), text=f"Extracting: {query}...")
-            # Add delay between products to avoid Groq rate limits
+            # Add delay between products to avoid Amazon rate limiting
             if idx > 0:
-                time.sleep(3)
+                time.sleep(12)
             # Invoke the LangGraph
             result = extraction_graph.invoke({
                 "query": query,
